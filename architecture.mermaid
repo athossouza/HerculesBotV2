@@ -1,33 +1,56 @@
-stateDiagram-v2
-    [*] --> START
-    START --> ROUTE_INTENT: User Message
+graph TD
+    %% Nodes
+    User((User))
     
-    ROUTE_INTENT --> REQUEST_WINDING_DATA: Intent = winding_data
-    ROUTE_INTENT --> SUPPORT_FLOW: Intent = tech_support
-    ROUTE_INTENT --> SUPPORT_FLOW: Intent = fallback
+    subgraph ZD [Zendesk Ecosystem]
+        SunCo[Sunshine Conversations API]
+        Switchboard{Switchboard}
+        Human[Human Agent]
+    end
+    
+    subgraph SERVER [Hercules Bot Server]
+        Webhook[Webhook Endpoint]
+        Buffer{Message Buffer}
+        Workflow[HerculesWorkflow Engine]
+        Logger[(In-Memory Logs)]
+        
+        subgraph LLM [LLM Layer]
+            Router[Intent Classifier]
+            Guard[Guardrails]
+            Generator[Response Generator]
+        end
+    end
+    
+    OpenAI((OpenAI API))
+    Dashboard[Web Dashboard]
 
-    state REQUEST_WINDING_DATA {
-        [*] --> RESTRICTED_ASK_PASSWORD
-        RESTRICTED_ASK_PASSWORD --> RESTRICTED_VERIFY_PASSWORD: User provides password
-        
-        RESTRICTED_VERIFY_PASSWORD --> RESTRICTED_ASK_SERIAL: Password Valid
-        RESTRICTED_VERIFY_PASSWORD --> HANDOFF_HUMAN: Max Attempts Exceeded
-        RESTRICTED_VERIFY_PASSWORD --> RESTRICTED_ASK_PASSWORD: Password Invalid (Retry)
-        
-        RESTRICTED_ASK_SERIAL --> RESTRICTED_VERIFY_SERIAL_FORMAT: User provides serial
-        
-        RESTRICTED_VERIFY_SERIAL_FORMAT --> RESTRICTED_CHECK_SERIAL_AGE: Format Valid
-        RESTRICTED_VERIFY_SERIAL_FORMAT --> RESTRICTED_ASK_SERIAL: Invalid Format (Retry)
-        
-        RESTRICTED_CHECK_SERIAL_AGE --> RESTRICTED_DELIVER_MOCK_PDF: Serial Age >= 3 (New)
-        RESTRICTED_CHECK_SERIAL_AGE --> HANDOFF_HUMAN: Serial Age < 3 (Old)
-    }
+    %% Flow - Inbound
+    User -- Message --> SunCo
+    SunCo -- Webhook Event --> Webhook
+    Webhook -- Add to Queue --> Buffer
+    Buffer -- Wait 2.0s --> Buffer
+    Buffer -- Batch Process --> Workflow
+    
+    %% Flow - Workflow logic
+    Workflow --> Router & Guard
+    Router & Guard & Generator <--> OpenAI
+    
+    %% Flow - Outbound (Reply)
+    Workflow -- Reply Text --> Webhook
+    Webhook -- POST /messages --> SunCo
+    SunCo --> User
+    
+    %% Flow - Outbound (Handoff)
+    Workflow -- State: HANDOFF --> Webhook
+    Webhook -- POST /passControl --> Switchboard
+    Switchboard -- Transfer --> Human
+    Human -- Chat --> User
 
-    state SUPPORT_FLOW {
-        [*] --> GENERAL_CHAT
-        GENERAL_CHAT --> GENERAL_CHAT: LLM Reply
-    }
+    %% Flow - Dashboard
+    Dashboard <--> Webhook & Logger
 
-    RESTRICTED_DELIVER_MOCK_PDF --> END
-    HANDOFF_HUMAN --> END
-    SUPPORT_FLOW --> END: User says bye
+    %% Styles
+    style User fill:#f9f,stroke:#333
+    style SunCo fill:#9cf,stroke:#333
+    style Switchboard fill:#f96,stroke:#333
+    style Human fill:#fcc,stroke:#333
