@@ -1,0 +1,7 @@
+.env
+tokenAPIOpenAI.txt
+__pycache__/
+*.log
+.venv/
+.DS_Store
+*.pyc
