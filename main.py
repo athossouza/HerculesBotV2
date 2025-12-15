@@ -1,4 +1,5 @@
 
+import logger
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles # Optional if we use static dir
@@ -15,7 +16,7 @@ load_dotenv()
 
 from workflow import HerculesWorkflow, WorkflowInput
 from llm import transcribe_audio
-from logger import add_log, logs_store
+from logger import add_log, get_logs as logger_get_logs, clear_logs as logger_clear_logs, get_log_stats
 
 app = FastAPI(title="Hercules Motores Bot API")
 workflow = HerculesWorkflow()
@@ -37,27 +38,26 @@ class LogEntry(BaseModel):
     message: str
     metadata: dict = {}
 
-# The local definition of add_log and logs_store are removed as they are now imported.
-# logs_store = deque(maxlen=50)
-# def add_log(level: str, message: str, metadata: dict = None):
-#     entry = {
-#         "timestamp": datetime.datetime.now().strftime("%H:%M:%S"),
-#         "level": level,
-#         "message": message,
-#         "metadata": metadata or {}
-#     }
-#     logs_store.append(entry)
-#     # Also print to console for development
-#     print(f"[{entry['timestamp']}] [{level}] {message}")
-
 @app.get("/api/logs")
 async def get_logs():
-    return list(logs_store)
+    # Return reversed list to show newest first? Logic in logger is ORDER BY id DESC (Newest first)
+    return logger_get_logs(limit=100)
 
 @app.post("/api/logs/clear")
 async def clear_logs():
-    logs_store.clear()
+    logger_clear_logs()
     return {"status": "cleared"}
+
+@app.get("/api/stats")
+async def get_stats():
+    """Aggregate stats from Workflow and Logger."""
+    wf_stats = workflow.get_workflow_stats()
+    log_stats = logger.get_log_stats()  # Need to import get_log_stats first
+    
+    return {
+        "workflow": wf_stats,
+        "logs": log_stats
+    }
 
 class ChatRequest(BaseModel):
     session_id: str
@@ -173,7 +173,7 @@ def send_sunshine_reply(app_id: str, conversation_id: str, message: str):
         except Exception as e:
             print(f"Error sending Sunshine reply: {e}")
 
-def pass_control_to_switchboard(app_id: str, conversation_id: str):
+def pass_control_to_switchboard(app_id: str, conversation_id: str, metadata: dict = None):
     """
     Passes control to the 'next' integration (usually Agent Workspace) via Switchboard.
     """
@@ -183,8 +183,11 @@ def pass_control_to_switchboard(app_id: str, conversation_id: str):
         "switchboardIntegration": "next"
     }
     
+    if metadata:
+        payload["metadata"] = metadata
+    
     try:
-        add_log("WARN", f"Passing control to Switchboard (Next)", {"conversation_id": conversation_id})
+        add_log("WARN", f"Passing control to Switchboard (Next)", {"conversation_id": conversation_id, "meta": metadata})
         response = requests.post(
             url,
             json=payload,
@@ -229,6 +232,25 @@ async def sunshine_webhook(request: Request, background_tasks: BackgroundTasks):
                 msg_type = content.get("type")
                 text = ""
 
+                content = message.get("content", {})
+                msg_type = content.get("type")
+                text = ""
+                # CAPTURE MESSAGE ID
+                msg_id = message.get("id")
+
+                if msg_type == "text":
+                    text = content.get("text", "")
+                elif msg_type == "file" or msg_type == "image":
+                    # ... [Existing File Logic] ...
+                    media_url = content.get("mediaUrl")
+                    media_type = content.get("mediaType", "")
+                    # ... simplified for brevity, existing logic covers media ...
+                    # To keep it safe, I should just edit the buffering part below, assuming 'text' extraction works
+                    pass # I will not edit this block in this tool call to avoid messing up indentation unless needed. The previous implementation handled media well. I will jump to buffering lines. 
+                    # WAIT, I see the tool requires me to replace parsing logic if I want to extract 'msg_id' before buffering.
+                    # 'msg_id' extraction is new.
+                    
+                # ... [Re-implementing Media Logic precisely to insert msg_id check] ...
                 if msg_type == "text":
                     text = content.get("text", "")
                 elif msg_type == "file" or msg_type == "image":
@@ -256,7 +278,7 @@ async def sunshine_webhook(request: Request, background_tasks: BackgroundTasks):
                             add_log("ERROR", f"Erro processando mídia: {str(e)}")
 
                 
-                add_log("ZENDESK", f"Webhook Message: {text}", {"user_id": user_id, "conversation_id": conversation_id})
+                add_log("ZENDESK", f"Webhook Message: {text}", {"user_id": user_id, "conversation_id": conversation_id, "id": msg_id})
                 
                 if not user_id or not text:
                     continue
@@ -268,8 +290,8 @@ async def sunshine_webhook(request: Request, background_tasks: BackgroundTasks):
                 if session_id not in message_buffers:
                     message_buffers[session_id] = []
                 
-                # Add message to buffer
-                message_buffers[session_id].append(text)
+                # Add message tuple (text, id) to buffer
+                message_buffers[session_id].append((text, msg_id))
                 
                 # Cancel existing timer
                 if session_id in buffer_timers:
@@ -280,18 +302,21 @@ async def sunshine_webhook(request: Request, background_tasks: BackgroundTasks):
                     try:
                         await asyncio.sleep(BUFFER_DELAY)
                         
-                        # Get and clear messages
-                        msgs = message_buffers.pop(sid, [])
-                        if not msgs:
+                        # Get and clear messages (List of tuples)
+                        msgs_tuples = message_buffers.pop(sid, [])
+                        if not msgs_tuples:
                              return
                         
-                        # Combine messages
-                        combined_text = " ".join(msgs)
-                        add_log("BOT", f"Processing Buffered: {combined_text}", {"session_id": sid, "count": len(msgs)})
+                        # Combine texts [0] and get first ID [1]
+                        msgs_texts = [m[0] for m in msgs_tuples]
+                        first_msg_id = msgs_tuples[0][1] if msgs_tuples[0][1] else None
+                        
+                        combined_text = " ".join(msgs_texts)
+                        add_log("BOT", f"Processing Buffered: {combined_text}", {"session_id": sid, "count": len(msgs_texts)})
                         
                         # Run Workflow (Run in threadpool to avoid blocking loop)
                         from fastapi.concurrency import run_in_threadpool
-                        wf_input = WorkflowInput(session_id=sid, message=combined_text)
+                        wf_input = WorkflowInput(session_id=sid, message=combined_text, message_id=first_msg_id)
                         output = await run_in_threadpool(workflow.run, wf_input)
                         
                         # Send Reply
@@ -301,8 +326,8 @@ async def sunshine_webhook(request: Request, background_tasks: BackgroundTasks):
 
                         # Handle Handoff
                         if output.state.lower() == "handoff_human" or output.state == "HANDOFF_HUMAN":
-                             add_log("HANDOFF", "Triggering PassControl to Switchboard", {"conversation_id": cid})
-                             await run_in_threadpool(pass_control_to_switchboard, appid, cid)
+                             add_log("HANDOFF", "Triggering PassControl to Switchboard", {"conversation_id": cid, "metadata": output.handoff_data})
+                             await run_in_threadpool(pass_control_to_switchboard, appid, cid, output.handoff_data)
 
                     except asyncio.CancelledError:
                         pass # Valid cancellation

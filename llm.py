@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Optional, Literal
 from pydantic import BaseModel, Field
 from openai import OpenAI
+from logger import add_log
 
 # Initialize client
 # Note: In production, you might want to wrap this or handle missing env vars gracefully
@@ -75,12 +76,13 @@ Your job:
 def classify_intent(user_message: str) -> IntentResponse:
     try:
         completion = client.beta.chat.completions.parse(
-            model="gpt-5-mini",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT_INTENT},
                 {"role": "user", "content": user_message},
             ],
             response_format=IntentResponse,
+            temperature=0.7,
         )
         return completion.choices[0].message.parsed
     except Exception as e:
@@ -103,12 +105,13 @@ def guard_check(user_message: str, current_expected_input: str) -> GuardResponse
     
     try:
         completion = client.beta.chat.completions.parse(
-            model="gpt-5-mini",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT_GUARD},
                 {"role": "user", "content": prompt},
             ],
             response_format=GuardResponse,
+            temperature=0.7,
         )
         return completion.choices[0].message.parsed
     except Exception as e:
@@ -139,12 +142,12 @@ def generate_support_reply(user_message: str) -> str:
     """
     try:
         completion = client.chat.completions.create(
-            model="gpt-5-mini",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ],
-            # temperature=0.7 # gpt-5-mini forces default temp (1)
+            temperature=0.7 
         )
         return completion.choices[0].message.content or "Desculpe, não consegui gerar uma resposta."
     except Exception as e:

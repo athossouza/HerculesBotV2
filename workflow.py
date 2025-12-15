@@ -25,51 +25,194 @@ class HerculesState(str, Enum):
 class WorkflowInput(BaseModel):
     session_id: str
     message: str
+    message_id: Optional[str] = None
 
 class WorkflowOutput(BaseModel):
     reply: str
     state: HerculesState
     debug: Optional[Dict[str, Any]] = None
+    handoff_data: Optional[Dict[str, Any]] = None
+
+import sqlite3
+import json
+import os
 
 class HerculesWorkflow(Workflow):
     description: str = "Hercules Motores Hard Dialog Bot"
     
-    # Simple in-memory session store for demo purposes.
-    # In production, use Redis or DB keyed by session_id.
-    _sessions: Dict[str, Dict[str, Any]] = {}
+    DB_FILE = "sessions.db"
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        self._init_db()
+
+    def _init_db(self):
+        """Initialize the SQLite database and session table."""
+        with sqlite3.connect(self.DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
 
     def _get_session(self, session_id: str) -> Dict[str, Any]:
-        if session_id not in self._sessions:
-            self._sessions[session_id] = {
-                "state": HerculesState.START,
-                "password_attempts": 0,
-                "max_password_attempts": 3,
-                "serial_number": None,
-                "is_authenticated": False
-            }
-        return self._sessions[session_id]
+        """Load session from DB or create new default."""
+        default_session = {
+            "state": HerculesState.START,
+            "password_attempts": 0,
+            "max_password_attempts": 3,
+            "serial_number": None,
+            "is_authenticated": False
+        }
+
+        with sqlite3.connect(self.DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT state, data FROM sessions WHERE session_id = ?", (session_id,))
+            row = cursor.fetchone()
+            
+            if row:
+                state, data_json = row
+                try:
+                    data = json.loads(data_json)
+                    # Merge with default to ensure new fields (if any) are present
+                    # But prioritize DB data
+                    session = default_session.copy()
+                    session.update(data)
+                    session["state"] = HerculesState(state) # Ensure Enum
+                    return session
+                except Exception as e:
+                    print(f"Error corruption in session {session_id}: {e}")
+                    # Fallback to default if corrupt
+            
+            # Create new if not found or corrupt
+            self._save_session(session_id, default_session)
+            return default_session
+
+    def _save_session(self, session_id: str, session: Dict[str, Any]):
+        """Save session state to DB."""
+        state = session["state"]
+        # Convert Enum to string for JSON serialization if needed, though 'state' column holds it.
+        # We store the rest of the dict in 'data' col.
+        
+        # Prepare data for JSON (exclude non-serializable if any, but our session is simple codes)
+        # Helper to convert Enum to str in dict
+        serializable_session = session.copy()
+        if isinstance(serializable_session["state"], Enum):
+            serializable_session["state"] = serializable_session["state"].value
+            
+        with sqlite3.connect(self.DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO sessions (session_id, state, data)
+                VALUES (?, ?, ?)
+            """, (session_id, state.value if isinstance(state, Enum) else state, json.dumps(serializable_session)))
+            conn.commit()
 
     def _update_state(self, session: Dict[str, Any], new_state: HerculesState):
+        """Update state in memory object object AND DB immediately."""
         session["state"] = new_state
+        # We need the session_id to save. 
+        # The current design passes 'session' dict around, which might not have 'session_id' inside it explicitly?
+        # Let's check _get_session. It returns a dict.
+        # We should inject session_id into the dict to make saving easier, OR pass session_id to this method.
+        # Looking at usage: self._update_state(session, ...)
+        # I will modify _get_session to include 'session_id' in the dict so we can save it back.
+        pass # This function will be replaced by the wrapper logic in run() actually.
+
+    def get_workflow_stats(self) -> Dict[str, Any]:
+        """Calculate Key Performance Indicators from sessions."""
+        stats = {
+            "total_sessions": 0,
+            "success_rate": 0.0,
+            "state_distribution": {}
+        }
+        try:
+            with sqlite3.connect(self.DB_FILE) as conn:
+                cursor = conn.cursor()
+                
+                # 1. Total Sessions
+                cursor.execute("SELECT COUNT(*) FROM sessions")
+                stats["total_sessions"] = cursor.fetchone()[0]
+                
+                # 2. Authenticated Sessions (Proxy for Success)
+                # We check if the JSON data contains "is_authenticated": true
+                cursor.execute("SELECT COUNT(*) FROM sessions WHERE data LIKE '%\"is_authenticated\": true%'")
+                authenticated_count = cursor.fetchone()[0]
+                
+                if stats["total_sessions"] > 0:
+                    stats["success_rate"] = round((authenticated_count / stats["total_sessions"]) * 100, 1)
+                
+                # 3. State Distribution
+                cursor.execute("SELECT state, COUNT(*) FROM sessions GROUP BY state")
+                rows = cursor.fetchall()
+                for state, count in rows:
+                    stats["state_distribution"][state] = count
+                
+                # 4. Channel Distribution (Web vs Sunshine)
+                stats["channels"] = {"web": 0, "whatsapp": 0}
+                
+                cursor.execute("SELECT COUNT(*) FROM sessions WHERE session_id LIKE 'sunshine_%'")
+                stats["channels"]["whatsapp"] = cursor.fetchone()[0]
+                
+                # Web sessions usually start with sess_ or are random strings not starting with sunshine_
+                stats["channels"]["web"] = stats["total_sessions"] - stats["channels"]["whatsapp"]
+                    
+        except Exception as e:
+            print(f"Error calculating stats: {e}")
+            
+        return stats
 
     def run(self, input_data: WorkflowInput) -> WorkflowOutput:
         session = self._get_session(input_data.session_id)
+        # Ensure session_id is in the dict for saving later
+        session["session_id"] = input_data.session_id
+        
         current_state = session["state"]
         user_msg = input_data.message.strip()
+
+        # Helper to save state updates during flow
+        def save_state(new_state: HerculesState):
+            session["state"] = new_state
+            self._save_session(input_data.session_id, session)
+
+        # Monkey patch the helper method for this run context (cleaner than changing all signatures)
+        # Or better, just override the method self._update_state to use this closure
+        self._update_state = lambda s, ns: save_state(ns)
+
+        # --- STATE MACHINE LOOP ---
 
         # --- STATE MACHINE LOOP (One Step Transition per Turn usually) ---
         
         # 1. SPECIAL CASE: START -> ROUTE
         if current_state == HerculesState.START:
             # First interaction, route directly
+            
+            # Save first_message_id if provided and not set
+            if input_data.message_id:
+                session["first_message_id"] = input_data.message_id
+                # Helper to update db immediately? No, we will update at the end via save_state or implicitly
+                # But we should ensure it persists.
+                self._save_session(input_data.session_id, session)
+
             return self._handle_route_intent(session, user_msg)
             
         # HANDLE RESET IF IN TERMINAL STATE
-        if current_state == HerculesState.END:
-             # User is talking again after goodbye -> Reset session
+        if current_state in [HerculesState.END, HerculesState.HANDOFF_HUMAN]:
+             # User is talking again after goodbye or handoff -> Reset session
              session["state"] = HerculesState.START
-             session["is_authenticated"] = False # Require auth again? Or keep it? Let's reset for safety.
+             session["is_authenticated"] = False
              session["password_attempts"] = 0
+             session["serial_number"] = None
+             
+             # Capture new First Message ID for this new session
+             if input_data.message_id:
+                session["first_message_id"] = input_data.message_id
+             
              # Re-process the message as if it were the start
              return self._handle_route_intent(session, user_msg)
             
@@ -92,7 +235,8 @@ class HerculesWorkflow(Workflow):
                  self._update_state(session, HerculesState.HANDOFF_HUMAN)
                  return WorkflowOutput(
                      reply="Entendido. Estou transferindo você para um atendente humano agora. Aguarde um momento...",
-                     state=HerculesState.HANDOFF_HUMAN
+                     state=HerculesState.HANDOFF_HUMAN,
+                     handoff_data={"first_message_id": session.get("first_message_id")}
                  )
 
             if intent_res.intent == IntentEnum.REQUEST_WINDING_DATA:
@@ -119,7 +263,8 @@ class HerculesWorkflow(Workflow):
              self._update_state(session, HerculesState.HANDOFF_HUMAN)
              return WorkflowOutput(
                  reply="Entendido. Estou transferindo você para um atendente humano. Aguarde um momento...",
-                 state=HerculesState.HANDOFF_HUMAN
+                 state=HerculesState.HANDOFF_HUMAN,
+                 handoff_data={"first_message_id": session.get("first_message_id")}
              )
 
         if intent_res.intent == IntentEnum.REQUEST_WINDING_DATA or intent_res.intent == IntentEnum.GENERAL_TECHNICAL_SUPPORT:
@@ -189,7 +334,8 @@ class HerculesWorkflow(Workflow):
             self._update_state(session, HerculesState.HANDOFF_HUMAN)
             return WorkflowOutput(
                 reply="Número máximo de tentativas excedido. Transferindo para um atendente humano.",
-                state=HerculesState.HANDOFF_HUMAN
+                state=HerculesState.HANDOFF_HUMAN,
+                handoff_data={"first_message_id": session.get("first_message_id")}
             )
             
         # Retry message
@@ -233,7 +379,8 @@ class HerculesWorkflow(Workflow):
             self._update_state(session, HerculesState.HANDOFF_HUMAN)
             return WorkflowOutput(
                 reply="Este motor é de uma fabricação antiga (série anterior a 2010). Não conseguimos gerar os dados automaticamente. Transferindo para engenharia...",
-                state=HerculesState.HANDOFF_HUMAN
+                state=HerculesState.HANDOFF_HUMAN,
+                handoff_data={"first_message_id": session.get("first_message_id")}
             )
 
     def _handle_post_delivery(self, session, message):

@@ -53,6 +53,69 @@
                     </svg>
                     New Session
                 </button>
+                </button>
+            </div>
+
+            <!-- KPI / Stats Bar -->
+            <div
+                class="h-16 border-b border-slate-800 bg-slate-900/30 flex items-center px-6 gap-6 relative overflow-hidden">
+                <div v-if="stats" class="flex items-center gap-6 w-full">
+                    <!-- Card 1: Success -->
+                    <div class="flex flex-col">
+                        <span class="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Auth Success</span>
+                        <span class="text-xl font-mono text-green-400 font-bold">{{ stats.workflow.success_rate
+                            }}%</span>
+                    </div>
+                    <!-- Card 2: Sessions -->
+                    <div class="flex flex-col">
+                        <span class="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Total
+                            Sessions</span>
+                        <span class="text-xl font-mono text-blue-400 font-bold">{{ stats.workflow.total_sessions
+                            }}</span>
+                    </div>
+                    <!-- Card 3: Errors -->
+                    <div class="flex flex-col">
+                        <span class="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Errors (24h)</span>
+                        <span class="text-xl font-mono text-white font-bold"
+                            :class="stats.logs.ERROR > 0 ? 'text-red-500' : 'text-slate-200'">{{ stats.logs.ERROR || 0
+                            }}</span>
+                    </div>
+                    <!-- Card 4: Channels -->
+                    <div class="flex flex-col border-l border-slate-700 pl-6">
+                        <span class="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Channels</span>
+                        <div class="flex gap-3 text-xs font-mono mt-1">
+                            <span class="text-blue-400 flex items-center gap-1">🌐 {{ stats.workflow.channels?.web || 0
+                                }}</span>
+                            <span class="text-green-500 flex items-center gap-1">💬 {{ stats.workflow.channels?.whatsapp
+                                || 0 }}</span>
+                        </div>
+                    </div>
+
+                    <!-- State Distribution Mini-Bar -->
+                    <div class="flex-1 flex flex-col justify-center ml-4 gap-1">
+                        <span class="text-[9px] text-slate-600 font-bold uppercase">Session Distribution</span>
+                        <div class="h-2 w-full bg-slate-800 rounded-full flex overflow-hidden">
+                            <!-- Simple colored segments based on known states -->
+                            <div v-if="stats.workflow.state_distribution.START" title="START"
+                                class="h-full bg-slate-600"
+                                :style="{width: (stats.workflow.state_distribution.START / stats.workflow.total_sessions * 100) + '%'}">
+                            </div>
+                            <div v-if="stats.workflow.state_distribution.SUPPORT_FLOW" title="SUPPORT"
+                                class="h-full bg-blue-500"
+                                :style="{width: (stats.workflow.state_distribution.SUPPORT_FLOW / stats.workflow.total_sessions * 100) + '%'}">
+                            </div>
+                            <div v-if="stats.workflow.state_distribution.RESTRICTED_ASK_SERIAL" title="AUTH OK"
+                                class="h-full bg-green-500"
+                                :style="{width: (stats.workflow.state_distribution.RESTRICTED_ASK_SERIAL / stats.workflow.total_sessions * 100) + '%'}">
+                            </div>
+                            <div v-if="stats.workflow.state_distribution.HANDOFF_HUMAN" title="HANDOFF"
+                                class="h-full bg-yellow-500"
+                                :style="{width: (stats.workflow.state_distribution.HANDOFF_HUMAN / stats.workflow.total_sessions * 100) + '%'}">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div v-else class="text-xs text-slate-600 animate-pulse">Loading stats...</div>
             </div>
 
             <!-- Messages Area -->
@@ -128,8 +191,9 @@
                         All Events
                     </button>
                     <button v-for="sess in uniqueSessions" :key="sess" @click="selectedSession = sess"
-                        class="w-full text-left px-3 py-2 border-b border-slate-700/50 hover:bg-slate-700 transition truncate"
+                        class="w-full text-left px-3 py-2 border-b border-slate-700/50 hover:bg-slate-700 transition truncate flex items-center gap-2"
                         :class="{'bg-blue-900/50 text-blue-200 border-l-2 border-l-blue-400': selectedSession === sess}">
+                        <span class="text-[10px] opacity-70">{{ sess.startsWith('sunshine_') ? '💬' : '🌐' }}</span>
                         {{ formatSessionId(sess) }}
                     </button>
                 </div>
@@ -219,6 +283,7 @@
                 const logBox = ref(null);
                 const selectedSession = ref(null);
                 let logInterval = null;
+                const stats = ref(null);
 
                 // --- COMPUTED --
                 const getLogSession = (log) => {
@@ -241,8 +306,9 @@
 
                 const formatSessionId = (id) => {
                     if (!id) return 'Unknown';
-                    if (id.length > 15) return id.substring(0, 12) + '...';
-                    return id;
+                    let display = id.replace('sunshine_', '').replace('sess_', '');
+                    if (display.length > 15) return display.substring(0, 12) + '...';
+                    return display;
                 };
 
                 const formatMetadata = (meta) => {
@@ -362,6 +428,12 @@
                         // Only scroll if was at bottom? For now just replace
                         logs.value = data.reverse(); // Newest first
                     } catch (e) { console.error("Log poll error", e); }
+
+                    // Also fetch stats
+                    try {
+                        const res = await fetch('/api/stats');
+                        stats.value = await res.json();
+                    } catch (e) { }
                 };
 
                 const clearLogs = async () => {
@@ -375,7 +447,7 @@
                 return {
                     sessionId, messages, inputMessage, loading, chatBox, msgInput, isRecording,
                     sendMessage, toggleRecording, resetSession,
-                    logs, logBox, clearLogs,
+                    logs, logBox, clearLogs, stats,
                     selectedSession, uniqueSessions, filteredLogs, formatSessionId, formatMetadata,
                     chatPanelWidth, startDrag
                 };
