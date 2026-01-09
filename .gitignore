@@ -1,6 +1,15 @@
 .env
 tokenAPIOpenAI.txt
 __pycache__/
+*.pyc
+.env
+.DS_Store
+.venv
+sessions.db
+server.log
+ngrok.log
+ngrok_output.log
+tokenAPIOpenAI.txt
 *.log
 .venv/
 .DS_Store
