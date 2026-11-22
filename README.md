@@ -1,5 +1,13 @@
 # 🤖 Hercules Motores AI Assistant
 
+## Agente de IA para suporte técnico no Zendesk e WhatsApp
+
+O HerculesBotV2 é um projeto de agente de IA para atendimento técnico. Ele se conecta ao Zendesk pelo Sunshine Conversations para atender via WhatsApp e widget web. O fluxo combina uma máquina de estados, que controla as etapas do atendimento, com um modelo de linguagem para interpretar as mensagens. Quando a situação exige um agente humano, o projeto preserva o contexto para a transferência.
+
+A implementação usa Python, FastAPI e Agno. Para testar a integração, é necessário configurar o ambiente local e, para os canais do Zendesk, uma integração Sunshine Conversations. As instruções técnicas estão abaixo.
+
+[Automação e IA no Zendesk](https://consultor.cx/automacao-e-ia-no-zendesk)
+
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![OpenAI](https://img.shields.io/badge/AI-OpenAI%20GPT--4o-412991?style=for-the-badge&logo=openai&logoColor=white)](https://openai.com)
